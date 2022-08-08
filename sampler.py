@@ -6,7 +6,7 @@
 #TODO: switch to multiprocessing after fixing the CUDA problem in multiprocessing
 
 import numpy as np
-import h5py, os, sys, re, pathlib, torch, torchani, random, subprocess
+import h5py, os, sys, re, pathlib, torch, torchani, random, subprocess, ase.io
 import threading, queue
 
 from ase import Atoms, units
@@ -14,6 +14,8 @@ from ase.md.langevin import Langevin
 from pathlib import Path
 
 from utils import *
+
+from pyscf import gto, dft
 
 from multiprocessing import Pool, Manager
 from multiprocessing import set_start_method
@@ -31,11 +33,10 @@ CHECK_INTERVAL = 5
 #TODO: there is no need to hard code this species order, should be possible to use the dict in the model with extra transformation
 SPECIES_ORDER=('H', 'C', 'N', 'O', 'F', 'S', 'Cl')   
 QBC_CUTOFF = 0.0002   #DEBUG: change it to a reasonable value, for demo purpose use small value to ensure MD triggered in the first step
+#query by committee
 
 TMP='/dev/shm'
 DELETE_TMP=True
-
-ORCA_PATH = Path('/storage/users/roman/Apps/orca_5_0_1_linux_x86-64_shared_openmpi411')
 
 
 def convert_char_list(char_list):
@@ -51,42 +52,18 @@ def convert_char_list(char_list):
         s += c
     return s
 
-def write_smear_input(atoms, coords, output_name, dft='PBE', etemp=0, charge=0, spin=1):   #DEBUG: change it back to WB97X, use fastest PBE for test purpose
-    ####################################
-    #The energy output is in Hartree!!!#
-    ####################################
-    #smear DFT input generator that also accept open shell cases
-    #please note that !TRAH can only be used in ORCA5
-    method = 'RKS'
-    if spin >1:
-        method='UKS'
-        
-    trah = '! TRAH' if etemp==0 else ''
-    with open(output_name,'w') as f:
-        f.write('''!%s %s tightscf scfconvforced
-%s
-%%scf SmearTemp %d
-MaxIter=500
-end 
-* xyz %d %d\n'''%(method, dft, trah, etemp, charge, spin))
-        for a, c in zip(atoms,coords):
-            f.write("   %s       %f         %f        %f\n"%(a, c[0],c[1],c[2]))
-        f.write('*\n')
-        
-def get_energy(filename):
-    ####################################
-    #The energy output is in Hartree!!!#
-    ####################################
-    #get single point energy result from ORCA output
-    try:
-        with open(filename,'r') as f:
-            #print(f.read())
-            for l in f.readlines():
-                if re.search('FINAL SINGLE POINT ENERGY',l):
-                    result = float(re.search('-?[1-9]\d*\.\d*|-?0\.\d*[1-9]\d*',l)[0])
-    except:
-        result = np.nan
-    return result
+def pyscf_QM(atoms):
+    s = ''
+    for a, c in zip(atoms.get_chemical_symbols(),atoms.get_positions()):
+        s += "   %s       %f         %f        %f;"%(a, c[0],c[1],c[2])
+    
+    ###DEBUG: this is just a temporary treatment 
+    ### switch to well-developed QM packages later
+    mol = gto.M(atom = s, basis = '6-31g**')
+    mf = dft.RKS(mol)
+    mf.xc = 'pbe,pbe'   
+    ret = mf.kernel()
+    return float(ret)
 
 
 def MD_sampler(source, model, collector):
@@ -122,11 +99,8 @@ def MD_sampler(source, model, collector):
                 steps += CHECK_INTERVAL
 
         if sampled:
-            with in_tempdir(basedir=TMP, delete_temp=DELETE_TMP):
-                write_smear_input(species, atoms.get_positions(), '1.inp')
-                result = subprocess.run('export LD_LIBRARY_PATH="%s:$LD_LIBRARY_PATH"&&%s %s.inp > %s.out'%(ORCA_PATH, ORCA_PATH/'orca', 1, 1), shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-                output_file = str(1)+'.out'
-                energy = get_energy(output_file)   #sometimes DFT would fail and get_energy returns np.nan
+            energy = pyscf_QM(atoms)
+            
         else:
             energy = np.nan
 
