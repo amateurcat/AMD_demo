@@ -6,8 +6,7 @@
 #TODO: switch to multiprocessing after fixing the CUDA problem in multiprocessing
 
 import numpy as np
-import h5py, os, sys, re, pathlib, torch, torchani, random, subprocess, ase.io
-import threading, queue
+import h5py, os, sys, re, pathlib, torch, torchani, random, ase.io
 
 from ase import Atoms, units
 from ase.md.langevin import Langevin
@@ -16,13 +15,6 @@ from pathlib import Path
 from utils import *
 
 from pyscf import gto, dft
-
-from multiprocessing import Pool, Manager
-from multiprocessing import set_start_method
-try:
-    set_start_method('spawn')
-except RuntimeError:
-    pass
 
 
 
@@ -68,9 +60,8 @@ def pyscf_QM(atoms):
 
 def MD_sampler(source, model, collector):
     
-    while source.qsize()>0:
-        #species and coordinates in the input are in the same format as in h5 file
-        key, species, coordinates = source.get()
+    for p in source:
+        key, species, coordinates = p
         device = list(model.neural_networks[0].parameters())[0].device
         
         species = np.array(species).astype(str)
@@ -110,36 +101,31 @@ def MD_sampler(source, model, collector):
             collector.append((key, species, atoms.get_positions().copy(), energy))
         else:
             pass
-        source.task_done()
 
-def dataset_sampler(h5file, model_pool, save_to='ext.h5'):
-    with Manager() as cl:
-        collector = cl.list()
-        source = queue.Queue()
-        db = h5py.File(h5file,'r')
-        for key in list(db.keys())[:1]:
-            species = np.array(db[key]['species']).copy()
-            #Due to some problem in previous vrsion of h5py
-            #Species array in ani1x dataset is not purely str and need a transformation here
-            #species = np.array(db[key]['species']).astype(str).copy()
-            for c in db[key]['coordinates'][:1]:
-                coordinates = np.array(c).copy()
-                source.put((key, species, coordinates))
+def dataset_sampler(h5file, model, save_to='ext.h5'):
+    
+    collector = []
+    source = []
+    db = h5py.File(h5file,'r')
+    for key in list(db.keys())[:1]:
+        species = np.array(db[key]['species']).copy()
+        #Due to some problem in previous vrsion of h5py
+        #Species array in ani1x dataset is not purely str and need a transformation here
+        #species = np.array(db[key]['species']).astype(str).copy()
+        for c in db[key]['coordinates'][:1]:
+            coordinates = np.array(c).copy()
+            source.append((key, species, coordinates))
                 
         #db.close()   #DEBUG: this should be enabled if you want to write to existing files
         
-        for model in model_pool:
-            threading.Thread(target=MD_sampler(source=source, model=model, collector=collector), daemon=True).start()
-            
-        source.join()
-        ret = list(collector)
+    MD_sampler(source, model, collector)
     
     if os.path.isfile(save_to):
         db_write = h5py.File(save_to,'a')
     else:
         db_write = h5py.File(save_to,'w')
     
-    for info in ret:
+    for info in collector:
         key, species, coordinate, energy = info
         if key in list(db_write.keys()):
             np.append(db_write[key]['coordinates'], coordinate)
@@ -153,7 +139,7 @@ def dataset_sampler(h5file, model_pool, save_to='ext.h5'):
     
     print('extra sampling done, new datapoints saved to '+ str(save_to))
     
-    return ret
+    return collector
 
             
     
